@@ -1,53 +1,123 @@
 #Corey Campbell (28905111) Corey Collins (29175354) 4/4/2018
-import numpy as np
-import pyscreenshot as ImageGrab
-from os import path
+import mss
+import mss.tools
+from PIL import Image
+from phue import Bridge
+import random
+import time
 
+def avg(image):
+    color_tuple = [None, None, None]
+    for channel in range(3):
+        pixels = image.getdata(band=channel)
+        values = []
+        for pixel in pixels:
+            values.append(pixel)
+        color_tuple[channel] = sum (values)/len(values)
+    return tuple(color_tuple)
 
-#Takes a list of integers that represent sections of the screen.
-#Returns a list of 2 integer lists that represent the XY values for the average color of the section.
-def screen_averages(sections):
-	section_totals = [[0] * 3 for _ in range(len(sections))]
-	section_xy = [[0] * 2 for _ in range(len(sections))]
-	img = ImageGrab.grab()
-	width, _ = img.size
-	imageData = list(img.getdata())
+def rgb_to_cie(rgb_tuple):
+    red = rgb_tuple[0]
+    green = rgb_tuple[1]
+    blue = rgb_tuple[2]
 
-	#Add up the RGB values for each pixel in each section.
-	for pixel, (r, g, b) in enumerate(imageData):
-		for section, (x1, x2, y1, y2) in enumerate(sections):
-			#Check to see if the pixel is the bounds of the section.
-			if (pixel % width) >= x1 and (pixel % width) < x2 and (pixel // width) >= y1 and (pixel // width) < y2:
-				section_totals[section][0] += r
-				section_totals[section][1] += g
-				section_totals[section][2] += b
+    #Use the formula described in https://gist.github.com/popcorn245/30afa0f98eea1c2fd34d to get xy values.
+    r = ((red + 0.055) / (1.055)) ** 2.4 if (red > 0.04045) else (red / 12.92)
+    g = ((green + 0.055) / (1.055)) ** 2.4 if (green > 0.04045) else (green / 12.92)
+    b = ((blue + 0.055) / (1.055)) ** 2.4 if (blue > 0.04045) else (blue / 12.92)
 
-	for section, (x1, x2, y1, y2) in enumerate(sections):
-		#Divide total RGB values by the number of pixels to get the average value per pixel.
-		i = (x2 - x1) * (y2 - y1)
-		red = section_totals[section][0] // i;
-		green = section_totals[section][1] // i;
-		blue = section_totals[section][2] // i;
-		
-		#Use the formula described in https://gist.github.com/popcorn245/30afa0f98eea1c2fd34d to get xy values.
-		r = ((red + 0.055) / (1.055)) ** 2.4 if (red > 0.04045) else (red / 12.92)
-		g = ((green + 0.055) / (1.055)) ** 2.4 if (green > 0.04045) else (green / 12.92)
-		b = ((blue + 0.055) / (1.055)) ** 2.4 if (blue > 0.04045) else (blue / 12.92)
+    X = r * 0.664511 + g * 0.154324 + b * 0.162028
+    Y = r * 0.283881 + g * 0.668433 + b * 0.047685
+    Z = r * 0.000088 + g * 0.072310 + b * 0.986039
 
-		X = r * 0.664511 + g * 0.154324 + b * 0.162028
-		Y = r * 0.283881 + g * 0.668433 + b * 0.047685
-		Z = r * 0.000088 + g * 0.072310 + b * 0.986039
+    if((X + Y + Z) == 0):
+        return (0, 0)
 
-		cx = X / (X + Y + Z)
-		cy = Y / (X + Y + Z)
+    cx = X / (X + Y + Z)
+    cy = Y / (X + Y + Z)
 
-		section_xy[section][0] = cx
-		section_xy[section][1] = cy
+    return (cx, cy)
 
-	return section_xy;
+def change_lights(mon, bulb, lights, monitor):
+    # Capture a bbox using percent values
+    left = monitor['left'] + monitor['width'] * mon // 100  # 0% from the left
+    top = monitor['top'] + monitor['height'] * mon // 100  # 0% from the top
+    right = left + 400  # 400px width
+    lower = top + 400  # 400px height
+
+    bbox = (left, top, right, lower)
+
+    # Grab the picture
+    # Using PIL would be something like:
+    # im = ImageGrab(bbox=bbox)
+    sct_img = sct.grab(bbox)
+
+    '''# save as png
+    output = 'output.png'.format(**monitor)
+    mss.tools.to_png(sct_img.rgb, sct_img.size, output=output)'''
+
+    # Create an Image
+    img = Image.new('RGB', sct_img.size)
+
+    # Best solution: create a list(tuple(R, G, B), ...) for putdata()
+    pixels = zip(sct_img.raw[2::4],
+                 sct_img.raw[1::4],
+                 sct_img.raw[0::4])
+    img.putdata(list(pixels))
+
+    rgb_tuple = avg(img)
+
+    luma = 0.2126 * rgb_tuple[0] + 0.7152 * rgb_tuple[1] + 0.0722 * rgb_tuple[2]
+
+    cx, cy = rgb_to_cie(rgb_tuple)
+
+    lights[bulb].xy = [cx, cy]
+    lights[bulb].brightness = int(luma * 2.54)
+
+    print('set light to ', cx, ' ', cy)
+    print('luminance: ', luma)
+    print()
 
 def main():
-	print(screen_averages([[0,1,700,800]]))
+	t = True
+
+	while t:
+		try:
+			ip = input("Enter the IP for the Bridge you would like to connect to: ")
+			b = Bridge(ip)
+			b.connect()
+			t = False
+		except:
+			print("Could not connect to the Bridge, try again.")
+
+	lights = b.get_light_objects()
+	print(lights())
+
+	light_sections = [0] * len(b.get_light_objects())
+
+	for i in range(lights):
+		t = True
+
+		while t:
+			try:
+				string = input("Enter the part of the screen you would like light " + i + " to represent.")
+				light_sections[i] = int(string)
+				t = False
+			except:
+				print("invalid input for light " + i + "!")
+
+	with mss.mss() as sct:
+		while t:
+			try:
+				string = input("Enter the monitor you would like to use: ")
+				monitor = sct.monitors[int(string)]
+				t = False
+			except:
+				print("invalid input for the monitor!")
+
+		while True:
+			for i in range(lights):
+				change_lights(light_sections[i], i, lights, monitor)
 
 if __name__ == "__main__":
     main()
